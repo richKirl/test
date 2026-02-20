@@ -1,0 +1,12 @@
+[package]
+name = "project_BVH"
+version = "0.1.0"
+edition = "2000"
+
+[dependencies]
+glam = "0.32"
+wide = "1.1.1"
+[profile.release]
+opt-level = 3
+lto = true          # Link Time Optimization (очень важно для инлайнинга функций из других модулей)
+codegen-units = 1
