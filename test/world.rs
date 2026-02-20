@@ -9,7 +9,8 @@ pub struct World {
     pub registry: HashMap<i32, Entity>, //std::map<int, std::unique_ptr<Entity>> registry;
     pub entity_to_node: HashMap<i32, i32>, //std::map<int, int> entityToNode;
     pub next_id: i32,                   //int nextId = 0;
-    pub que_delete: Vec<i32>,           //std::vector<int> deletionQueue;
+    pub free_ids: Vec<i32>,
+    pub que_delete: Vec<i32>, //std::vector<int> deletionQueue;
 }
 #[rustfmt::skip]
 impl World {
@@ -25,11 +26,15 @@ impl World {
             entity_to_node: HashMap::new(),
             next_id: 0,
             que_delete: Vec::new(),
+            free_ids: Vec::new(),
         }
     }
     pub fn create_entity(&mut self, pos: Vec3, size: Vec3, cat: i32, mask: i32) -> i32 {
-        self.next_id += 1;
-        let id = self.next_id;
+        let id = self.free_ids.pop().unwrap_or_else(||{
+            let new_id = self.next_id;
+            self.next_id +=1;
+            new_id
+        });
         let e = Entity::new(id, pos, size, cat, mask);
         self.entity_to_node
             .insert(id, self.bvh.insert_leaf(id, &e.get_aabb()));
@@ -95,9 +100,90 @@ impl World {
         }
     }
 
-    pub fn raycast(p1:Vec3,p2:Vec3,mask:i32) -> i32 {
-        mask
+    pub fn raycast(&self, p1: Vec3, p2: Vec3, mask: i32) -> i32 {
+        if self.bvh.root == -1 { return -1; }
+
+        let dir = (p2 - p1).normalize();
+        // Избегаем деления на ноль: добавляем крошечное число к компонентам
+        let inv_dir = Vec3::new(1.0 / dir.x, 1.0 / dir.y, 1.0 / dir.z);
+
+        let mut stack = Stack::new();
+        stack.push(self.bvh.root);
+
+        let mut hit_id = -1;
+        let mut min_dist = f32::MAX;
+
+        while let Some(node_idx) = stack.pop() {
+            let node = &self.bvh.nodes[node_idx as usize];
+
+            // Ray-AABB Intersection
+            let t0 = (node.bbox.min - p1) * inv_dir;
+            let t1 = (node.bbox.max - p1) * inv_dir;
+
+            let t_min_vec = t0.min(t1);
+            let t_max_vec = t0.max(t1);
+
+            let t_near = t_min_vec.max_element();
+            let t_far = t_max_vec.min_element();
+
+            // Если луч не пересекает коробку или коробка позади луча
+            if t_far < 0.0 || t_near > t_far {
+                continue;
+            }
+
+            if node.is_leaf {
+                if let Some(entity) = self.registry.get(&node.object_index) {
+                    // Проверка маски
+                    if (entity.category & mask) != 0 {
+                        let d = p1.distance(entity.pos);
+                        if d < min_dist {
+                            min_dist = d;
+                            hit_id = node.object_index;
+                        }
+                    }
+                }
+            } else {
+                // Для оптимизации: можно сначала пушить дальний узел, потом ближний
+                stack.push(node.child1);
+                stack.push(node.child2);
+            }
+        }
+        hit_id
     }
+
+    pub fn can_move_to(&self, entity_id: i32, target_pos: Vec3, stack: &mut Stack<i32>) -> bool {
+        // 1. Получаем сущность
+        let entity = match self.registry.get(&entity_id) {
+            Some(e) => e,
+            None => return false,
+        };
+
+        // 2. Вычисляем AABB для новой позиции
+        let half_size = entity.size * 0.5;
+        let target_box = Aabb::new(
+            target_pos - half_size,
+            target_pos + half_size
+        );
+
+        // 3. Собираем потенциальные коллизии через BVH
+        let mut collisions = Vec::with_capacity(16);
+        self.query(&target_box, &mut collisions);
+
+        // 4. Проверяем маску столкновений (Bitmask Filtering)
+        for hit_id in collisions {
+            if hit_id == entity_id { continue; } // Игнорируем себя
+
+            if let Some(target) = self.registry.get(&hit_id) {
+                // Если категория встреченного объекта входит в нашу маску столкновений
+                if (target.category & entity.mask) != 0 {
+                    return false; // Путь прегражден
+                }
+            }
+        }
+
+        true // Коллизий нет, путь свободен
+    }
+
 
     pub fn mark_for_deletion(&mut self, id: i32) {
         if let Some(entity) = self.registry.get_mut(&id) {
@@ -117,6 +203,7 @@ impl World {
             }
             // 2. Удаляем саму сущность
             self.registry.remove(&id);
+            self.free_ids.push(id);
         }
     }
     pub fn clear_all(&mut self) {
