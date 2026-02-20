@@ -1,7 +1,7 @@
 [package]
 name = "project_BVH"
 version = "0.1.0"
-edition = "2000"
+edition = "-1"
 
 [dependencies]
 glam = "0.32"
